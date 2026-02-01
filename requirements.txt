@@ -1,0 +1,13 @@
+# TsMpp自动化测试系统依赖包
+
+# 串口通信
+pyserial>=3.5
+
+# OpenCV用于RTSP拉流和图像处理
+opencv-python>=4.8.0
+
+# 数据可视化
+matplotlib>=3.7.0
+
+# 文档处理（用于读取.docx文档）
+python-docx>=0.8.11

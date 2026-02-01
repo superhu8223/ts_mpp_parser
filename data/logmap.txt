@@ -1,0 +1,64 @@
+
+#串口典型日志，不区分大小写
+serial_emerge={
+	{"segment fault", "segmentFault"},
+	{"kernel panic", "kernel panic"},
+	{"out of memory", "oom"},
+	{"killed", "killed"},
+	{"Unable to handle kernel NULL pointer dereference at virtual address", "kernel NULL ptr"},
+	{"Internal error: undefined instruction", "undefined instruction"}
+}
+
+serial_error={
+	{"====>>>> isp err status=", "isp err status"},
+	{"faild", "error"},
+	{"overflow", "vpe overflow"},
+	{"-[ cut here ]-", "kernel warning"}
+}
+
+serial_warning={
+	{"MVX session", "vpu报错"},
+	{"WARN: ", "warning"}
+}
+
+serial_info={
+	{"U-Boot 20", "reboot"},
+	{"VMX", "vpu报错"},
+	{"Token [aiisp] [1]", "进入aiisp模式"},
+	{"Token [aiisp] [0]", "进入非aiisp模式"}
+}
+
+serial_ignore={
+	{"Welcome", "welcome"}
+}
+
+
+
+#launch起流线程典型日志,不区分大小写
+launch_emerge={
+	{"segment fault", "segmentFault"},
+	{"kernel panic", "kernel panic"},
+	{"out of memory", "oom"},
+	{"killed", "killed"},
+	{"Aborted", "Aborted"},
+	{"get venc stream time out", "venc断流"}
+}
+launch_error={
+	{"overflow", "vpe overflow"},
+	{"get pid zero from efuse", "efuse为空"},
+	{"faild", "error"},
+	{"fatal", "error"},
+	{"<e>", "error"},
+	{"<error>", "error"}
+}
+
+launch_warning={
+}
+
+launch_info={
+}
+
+launch_ignore={
+	{"Running <", "running funs"}
+}
+

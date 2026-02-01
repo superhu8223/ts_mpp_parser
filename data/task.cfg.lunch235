@@ -1,0 +1,116 @@
+
+#串口配置
+port=COM56
+baudrate=115200
+databits=8
+parity=none
+stopbits=1
+flowcontrol=none
+
+#evb配置
+evb_ip=192.168.1.10
+evb_port=23
+
+task_name="5326+lunch235",
+burn_flash="false",
+fip_name="fip_tx5326dv500_evb-aiisp.bin",
+kernel_name="ts-tx5326dv500-evb-aiisp.itb",
+rootfs_name="rootfs.squashfs",
+userfs_name="usr.squashfs",
+eachCaseNeedReboot="false",
+burn_fip_cmd="run update_fip_spinor"
+burn_kernel_cmd="run update_kernel_spinor"
+burn_rootfs_cmd="run update_rootfs_spinor"
+burn_userfs_cmd="run update_usrfs_spinor"
+
+case_list={
+    {
+        #case_id 对应禅道的case_id
+        case_id=1,
+        case_name="单目双流",
+        preCmd={
+            "insmod_nfs",
+            "ifconfig eth0 192.168.1.10",
+            "cd /tmp",
+            "mkdir nfs",
+            "sleep 5",
+            "mount -t nfs -o nolock,nfsvers=3   192.168.1.99:/home/superhu/wsp/filesys/dt58 nfs",
+            "cp /tmp/nfs/tests/st_debug_client /tmp/",
+            "cp /tmp/nfs/libs/usr_library_forTS.so /tmp/",
+            "telnetd"
+        },
+        runCmd={
+            "sample_venc 0 --viSize=4mp --vpssSize=2mp,1mp"
+        },
+        streamNum=2,
+        holdtime=30,
+        bNeedReboot="false",
+        ubootCmd={
+            "setenv nor_bootargs \"setenv bootargs ${arg_console} ${norroot} ${mtdparts} cma=52M\"",
+            "saveenv"
+        },
+        
+        #cmd之后需要在monitorThread中检查的项目和检查值
+        runCmdChecks={
+            viSize={4mp},
+            viMinFps={15},
+            vpssInSize={4mp},
+            vpssOutSize={4mp,1mp},
+            vpssMinFps={15,15},
+            vencSize={4mp,1mp},
+            vencMinFps={15,15},
+            vencMaxBitrate={1000,500}
+        }
+        debugActions={
+            {
+                #距离上一次操作的间隔时间，单位为秒
+                timeGap=10,
+                actionCmd="set_vpss_res -g 0 -c 0 -res 1",
+                actionChecks={
+                    vpssOutSize={2mp,1mp},
+                    vencSize={2mp,1mp},
+                    vencMinFps={15,15},
+                    vencMaxBitrate={1000,500}
+                }
+            },
+            {
+                #距离上一次操作的间隔时间，单位为秒
+                timeGap=10,
+                actionCmd="set_vpss_res -g 0 -c 0 -res 1",
+                actionChecks={
+                    viSize={2mp},
+                    viMinFps={15},
+                    vpssInSize={2mp},
+                    vpssOutSize={2mp,1mp},
+                    vpssMinFps={15,15},
+                    vencSize={2mp,1mp},            
+                    vencMinFps={15,15},
+                    vencMaxBitrate={1000,500}
+                }
+            }
+        }
+    },
+    {
+        #case_id 对应禅道的case_id
+        case_id=2,
+        case_name="单目双流",
+        runCmd={
+            "sample_venc 0  --viSize=4mp --vpssSize=2mp,1mp"
+        },
+        bNeedReboot="false",
+        streamNum=2,
+        holdtime="longtime",
+        runCmdChecks={
+            viSize={4mp},
+            viMinFps={15},
+            vpssInSize={4mp},
+            vpssOutSize={4mp,1mp},
+            vpssMinFps={15,15},
+            vencSize={4mp,1mp},
+            vencMinFps={15,15},
+            vencMaxBitrate={1000,500}
+        }
+        #当前case不需要debugAction
+    }
+}
+
