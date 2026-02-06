@@ -24,11 +24,13 @@ except ImportError:
 class RTSPHandler:
     """RTSP处理器"""
     
-    def __init__(self, stream_id: int, url: str, simplified_mode: bool = False):
+    def __init__(self, stream_id: int, url: str, simplified_mode: bool = False, use_udp: bool = False):
         self.stream_id = stream_id
         self.url = url
         self.stats = StreamStats(stream_id=stream_id, url=url)
+        self.use_udp = use_udp  # 是否使用UDP协议
         self.is_running = False
+        self.stop_requested = False  # 标记是否由stop()触发停止
         self.thread: Optional[threading.Thread] = None
         self.capture: Optional[cv2.VideoCapture] = None
         self.av_container = None  # PyAV容器
@@ -45,6 +47,13 @@ class RTSPHandler:
         self.backend = None  # 用于存储VideoCapture的backend信息
         self.simplified_mode = simplified_mode  # 简化模式（bNeedCtrlC模式），只检测是否收到数据，不解码显示
         self.stream_disconnected_reported = False  # 断流是否已报告过
+        self.last_callback_time = None  # 上次调用frame_callback的时间，用于限制更新频率
+    
+    def set_transport(self, use_udp: bool):
+        """动态设置传输协议（UDP/TCP）"""
+        self.use_udp = use_udp
+        transport = 'udp' if use_udp else 'tcp'
+        print(f"[RTSP{self.stream_id}] 传输协议已设置为: {transport.upper()}")
     
     def is_h264_keyframe(self, frame_data: bytes) -> bool:
         """
@@ -103,28 +112,27 @@ class RTSPHandler:
     def stop(self):
         """停止拉流"""
         print(f"[RTSP{self.stream_id}] 停止信号已发送，is_running=False")
+        self.stop_requested = True
         self.is_running = False
         
         # 第一步：立即释放资源，强制中断可能的阻塞IO
         print(f"[RTSP{self.stream_id}] 开始释放资源...")
         
-        try:
-            if self.capture:
-                print(f"[RTSP{self.stream_id}] 释放VideoCapture资源（立即）...")
-                self.capture.release()
-                print(f"[RTSP{self.stream_id}] VideoCapture资源已释放")
-                self.capture = None
-        except Exception as e:
-            print(f"[RTSP{self.stream_id}] 释放VideoCapture失败: {e}")
+        # 禁用FFmpeg的线程检查，避免断言失败
+        import os
+        os.environ['FFREPORT'] = 'level=quiet'
+        
+        # 不在stop中直接release，避免与拉流线程并发导致FFmpeg断言
+        # 交由拉流线程退出时统一释放
         
         try:
             if self.av_container:
-                print(f"[RTSP{self.stream_id}] 关闭AV容器（立即）...")
+                print(f"[RTSP{self.stream_id}] 关闭AV容器...")
                 self.av_container.close()
                 print(f"[RTSP{self.stream_id}] AV容器已关闭")
                 self.av_container = None
         except Exception as e:
-            print(f"[RTSP{self.stream_id}] 关闭AV容器失败: {e}")
+            print(f"[RTSP{self.stream_id}] 关闭AV容器失败（忽略）: {type(e).__name__}")
         
         # 第二步：等待读取线程退出
         thread = self.thread
@@ -136,8 +144,7 @@ class RTSPHandler:
             wait_time = time.time() - start_wait_time
             if thread.is_alive():
                 # 线程仍未退出，但我们已经释放了资源，继续进行
-                print(f"[RTSP{self.stream_id}] 警告：拉流线程{wait_time:.1f}秒后仍未退出，可能卡在阻塞IO，继续强制停止")
-                # 不再等待，继续清理下一个处理器
+                print(f"[RTSP{self.stream_id}] 警告：拉流线程{wait_time:.1f}秒后仍未退出，强制停止")
             else:
                 print(f"[RTSP{self.stream_id}] 拉流线程已正常退出（耗时{wait_time:.1f}秒）")
         
@@ -146,24 +153,55 @@ class RTSPHandler:
     
     def _stream_loop(self):
         """拉流循环"""
+        # 在启动时就设置环境变量（对所有模式生效）
+        transport = 'udp' if self.use_udp else 'tcp'
+        import os
+        os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = f'rtsp_transport;{transport}'
+        # 禁用FFmpeg的线程检查，避免Assertion错误（这是已知的FFmpeg多线程问题）
+        os.environ['FFREPORT'] = 'level=quiet'
+        os.environ['FFMPEG_THREAD_TYPE'] = 'slice'  # 使用更稳定的线程模式
+        print(f"[RTSP{self.stream_id}] 设置全局环境变量: OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;{transport}")
+        print(f"[RTSP{self.stream_id}] 禁用FFmpeg线程检查")
+        
         # 如果是简化模式，使用简化的收流逻辑
         if self.simplified_mode:
+            print(f"[RTSP{self.stream_id}] 使用简化模式（OpenCV）")
             self._stream_loop_simplified()
         # 优先使用PyAV获取帧类型，fallback到OpenCV
         elif PYAV_AVAILABLE:
+            print(f"[RTSP{self.stream_id}] 使用PyAV模式（优先）")
             self._stream_loop_pyav()
         else:
+            print(f"[RTSP{self.stream_id}] 使用OpenCV模式（fallback）")
             self._stream_loop_opencv()
     
     def _stream_loop_simplified(self):
         """简化模式的拉流（bNeedCtrlC模式）：只检测是否收到数据，不解码显示，不统计帧率码率"""
-        print(f"[RTSP{self.stream_id}] 启动简化模式收流，URL: {self.url}")
+        transport = 'udp' if self.use_udp else 'tcp'
+        print(f"[RTSP{self.stream_id}] 启动简化模式收流，URL: {self.url}, 传输协议: {transport.upper()}")
+        
+        # 设置环境变量控制FFmpeg的RTSP传输协议
+        import os
+        os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = f'rtsp_transport;{transport}'
+        print(f"[RTSP{self.stream_id}] 设置环境变量: OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;{transport}")
         
         while self.is_running:
             try:
-                print(f"[RTSP{self.stream_id}] 正在连接到: {self.url} (简化模式)")
-                # 使用OpenCV简单连接，只检测是否能收到数据
-                self.capture = cv2.VideoCapture(self.url)
+                print(f"[RTSP{self.stream_id}] 正在连接到: {self.url} (简化模式, 协议: {transport.upper()})")
+                
+                # 尝试使用params参数（OpenCV 4.5+）
+                try:
+                    params = [
+                        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+                        cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000
+                    ]
+                    self.capture = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG, params)
+                    print(f"[RTSP{self.stream_id}] 使用params参数创建 VideoCapture")
+                except Exception as e:
+                    print(f"[RTSP{self.stream_id}] params参数方式失败: {e}，使用默认方式")
+                    self.capture = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+                    if hasattr(cv2, 'CAP_PROP_OPEN_TIMEOUT_MSEC'):
+                        self.capture.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
                 
                 if not self.capture.isOpened():
                     print(f"[RTSP{self.stream_id}] 无法打开RTSP流: {self.url}，2秒后重试...")
@@ -254,9 +292,21 @@ class RTSPHandler:
         
         while self.is_running and retry_count < max_retries:
             try:
-                print(f"[RTSP{self.stream_id}] 正在连接到: {self.url} (使用PyAV)")
-                # 打开RTSP流
-                self.av_container = av.open(self.url, options={'rtsp_transport': 'tcp'})
+                # 根据use_udp标志选择传输协议
+                transport = 'udp' if self.use_udp else 'tcp'
+                print(f"[RTSP{self.stream_id}] 正在连接到: {self.url} (使用PyAV, 传输协议: {transport.upper()})")
+                
+                # 打开RTSP流 - PyAV需要使用format_options传递给底层FFmpeg
+                # 参考: https://github.com/PyAV-Org/PyAV/issues/conversions
+                format_options = {
+                    'rtsp_transport': transport,
+                    'rtsp_flags': 'prefer_tcp' if transport == 'tcp' else '',
+                }
+                # 移除空值
+                format_options = {k: v for k, v in format_options.items() if v}
+                
+                print(f"[RTSP{self.stream_id}] PyAV打开参数: format_options={format_options}")
+                self.av_container = av.open(self.url, options=format_options, format='rtsp')
                 video_stream = self.av_container.streams.video[0]
                 try:
                     # 跳过 B 帧，只解码 I/P，降低解码开销
@@ -357,17 +407,23 @@ class RTSPHandler:
                         if is_keyframe and self.keyframe_images_saved < 3 and self.save_dir:
                             self._save_keyframe(frame)
                         
-                        # 每帧都调用回调更新GUI显示
+                        # 每帧都调用回调更新GUI显示，但限制频率最高1秒1次
                         if self.frame_callback:
-                            try:
-                                self.frame_callback(self.stream_id, frame, current_fps_live, current_bitrate_live)
-                            except Exception as e:
-                                print(f"[Stream{self.stream_id}] 视频帧回调错误: {e}")
-                                import traceback
-                                traceback.print_exc()
-                        else:
-                            if self.frame_count <= 3:  # 只在前3帧打印
-                                print(f"[RTSP{self.stream_id}] 警告: frame_callback未设置（第{self.frame_count}帧）")
+                            if self.last_callback_time is None or (now - self.last_callback_time).total_seconds() >= 1.0:
+                                try:
+                                    self.frame_callback(self.stream_id, frame, current_fps_live, current_bitrate_live)
+                                    self.last_callback_time = now
+                                except Exception as e:
+                                    print(f"[Stream{self.stream_id}] 视频帧回调错误: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                            else:
+                                # 继续显示帧，但不更新统计信息
+                                if self.frame_callback:
+                                    try:
+                                        self.frame_callback(self.stream_id, frame, 0, 0)  # 传递0的统计，只显示帧
+                                    except Exception:
+                                        pass
                         
                         # 每5秒统计一次帧率和码率
                         if (now - self.last_stats_time).total_seconds() >= 5.0:
@@ -406,12 +462,31 @@ class RTSPHandler:
         """使用OpenCV拉流（fallback，无法获取准确帧类型）"""
         retry_count = 0
         max_retries = 5
+        transport = 'udp' if self.use_udp else 'tcp'
+        
+        # 设置环境变量控制FFmpeg的RTSP传输协议
+        import os
+        os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = f'rtsp_transport;{transport}'
+        print(f"[RTSP{self.stream_id}] 设置环境变量: OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;{transport}")
         
         while self.is_running and retry_count < max_retries:
             try:
-                # 尝试打开RTSP流
-                print(f"[RTSP{self.stream_id}] 正在连接到: {self.url}")
-                self.capture = cv2.VideoCapture(self.url)
+                # 尝试打开RTSP流，根据use_udp设置传输协议
+                print(f"[RTSP{self.stream_id}] 正在连接到: {self.url} (使用OpenCV, 协议: {transport.upper()})")
+                
+                # 尝试使用params参数（OpenCV 4.5+）
+                try:
+                    params = [
+                        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+                        cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000
+                    ]
+                    self.capture = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG, params)
+                    print(f"[RTSP{self.stream_id}] 使用params参数创建 VideoCapture")
+                except Exception as e:
+                    print(f"[RTSP{self.stream_id}] params参数方式失败: {e}，使用默认方式")
+                    self.capture = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+                    if hasattr(cv2, 'CAP_PROP_OPEN_TIMEOUT_MSEC'):
+                        self.capture.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
                 
                 if not self.capture.isOpened():
                     print(f"[RTSP{self.stream_id}] 无法打开RTSP流: {self.url}")
@@ -509,15 +584,23 @@ class RTSPHandler:
                     if is_keyframe and self.keyframe_images_saved < 3 and self.save_dir:
                         self._save_keyframe(frame)
                     
-                    # 每帧都调用回调更新GUI显示（不限于关键帧）
+                    # 每帧都调用回调更新GUI显示，但限制统计信息更新频率为最高1秒一次
                     if self.frame_callback:
-                        try:
-                            # 使用当前周期的实时统计更新叠加
-                            self.frame_callback(self.stream_id, frame, current_fps_live, current_bitrate_live)
-                        except Exception as e:
-                            print(f"[Stream{self.stream_id}] 视频帧回调错误: {e}")
-                            import traceback
-                            traceback.print_exc()
+                        if self.last_callback_time is None or (now - self.last_callback_time).total_seconds() >= 1.0:
+                            try:
+                                # 更新统计信息
+                                self.frame_callback(self.stream_id, frame, current_fps_live, current_bitrate_live)
+                                self.last_callback_time = now
+                            except Exception as e:
+                                print(f"[Stream{self.stream_id}] 视频帧回调错误: {e}")
+                                import traceback
+                                traceback.print_exc()
+                        else:
+                            # 继续显示帧，但不更新统计信息（传0值）
+                            try:
+                                self.frame_callback(self.stream_id, frame, 0, 0)
+                            except Exception:
+                                pass
                     else:
                         if self.frame_count <= 3:  # 只在前3帧打印
                             print(f"[RTSP{self.stream_id}] 警告: frame_callback未设置（第{self.frame_count}帧）")
@@ -538,8 +621,11 @@ class RTSPHandler:
                 
                 break  # 正常退出循环
                 
-            except Exception as e:
+            except BaseException as e:
                 print(f"RTSP拉流错误: {e}")
+                # 如果已停止，不再重试，直接退出循环
+                if not self.is_running:
+                    break
                 retry_count += 1
                 time.sleep(2)
         
@@ -553,9 +639,15 @@ class RTSPHandler:
             )
             self._trigger_event(event)
         
-        if self.capture:
-            self.capture.release()
-            self.capture = None
+        # 确保capture被释放（使用异常捕获避免C++异常导致程序退出）
+        try:
+            if self.capture:
+                print(f"[RTSP{self.stream_id}] 拉流线程结束，释放VideoCapture...")
+                self.capture.release()
+                self.capture = None
+                print(f"[RTSP{self.stream_id}] 拉流线程的VideoCapture已释放")
+        except BaseException as release_err:
+            print(f"[RTSP{self.stream_id}] 拉流线程释放VideoCapture失败（忽略）: {type(release_err).__name__}")
     
     def _update_stats(self, now, frame_count_in_period, bytes_in_period):
         """更新统计信息"""

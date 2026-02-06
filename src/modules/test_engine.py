@@ -86,25 +86,40 @@ class TestEngine:
                     print(f"[DEBUG] 正在调用_execute_case()...")
                     self._execute_case(case)
                     print(f"[Case循环] Case {i+1} 执行完成，is_running={self.is_running}")
-                except Exception as case_err:
-                    print(f"[Case循环] Case {i+1} 执行异常: {case_err}")
+                except BaseException as case_err:
+                    # 捕获所有异常（包括系统异常），但继续执行下一个case
+                    print(f"[Case循环] Case {i+1} 执行异常: {type(case_err).__name__}")
                     import traceback
                     traceback.print_exc()
-                    # 不要break，继续执行下一个case
                     print(f"[Case循环] 继续执行下一个case...")
             print(f"[DEBUG] case循环已结束，is_running={self.is_running}")
             
             # Step4: 生成task报告
+            # 为当前task生成报告（无论current_case是否存在，都必须生成）
             try:
                 self.test_task.end_time = datetime.now()
-                print(f"[Task报告] 开始生成task报告，task_dir={self.test_task.task_dir}")
-                ReportGenerator.generate_task_report(self.test_task, self.test_task.task_dir)
-                print(f"[Task报告] task报告生成完成")
-            except Exception as report_err:
-                print(f"[Task报告] 生成task报告失败: {report_err}")
+                print(f"[Task报告] 开始生成task报告")
+                
+                # 确定task_dir：优先使用self.test_task.task_dir，否则从current_case推导
+                task_dir = self.test_task.task_dir
+                if not task_dir and self.current_case:
+                    # 从case_dir推导task_dir（case_dir = task_dir/case_N）
+                    case_dir = self.current_case.case_dir
+                    if case_dir:
+                        task_dir = os.path.dirname(case_dir)
+                
+                print(f"[Task报告] task_dir={task_dir}")
+                
+                if task_dir and isinstance(task_dir, str) and os.path.isdir(task_dir):
+                    print(f"[Task报告] task_dir有效，准备生成task_report.md...")
+                    ReportGenerator.generate_task_report(self.test_task, task_dir)
+                    print(f"[Task报告] task报告生成完成")
+                else:
+                    print(f"[Task报告] task_dir无效或不存在: {task_dir}")
+            except Exception as task_report_err:
+                print(f"[Task报告] 生成task报告失败: {task_report_err}")
                 import traceback
                 traceback.print_exc()
-            
         except Exception as e:
             print(f"测试任务执行错误: {e}")
         finally:
@@ -112,7 +127,7 @@ class TestEngine:
                 self._cleanup()
             except Exception as cleanup_err:
                 print(f"清理资源时出错: {cleanup_err}")
-    
+
     def _step1_prepare(self):
         """准备阶段"""
         try:
@@ -167,7 +182,8 @@ class TestEngine:
             import traceback
             traceback.print_exc()
             raise
-    
+
+
     def _step2_burn(self):
         """烧录阶段"""
         # 获取全局烧录锁，确保同一时间只有一个序列在烧录
@@ -278,6 +294,10 @@ class TestEngine:
         
         # 初始化内存历史
         test_case.free_mem_history = []
+        test_case.isp_history = []
+        test_case.vi_history = []
+        test_case.vpss_history = []
+        test_case.venc_history = []
         
         # 用于FATAL事件提前终止当前case，但不影响后续 case
         case_should_stop = False
@@ -361,7 +381,13 @@ class TestEngine:
                 bitrate_count = len(handler.stats.bitrate_history) if handler.stats.bitrate_history else 0
                 print(f"[生成报告] rtsp_handlers[{idx}]: stream_id={handler.stream_id}, fps_count={fps_count}, bitrate_count={bitrate_count}, first_frame_time={handler.stats.first_frame_time}")
             
-            stats_list = [h.stats for h in self.rtsp_handlers]
+            # 如果rtsp_handlers已被清空（stop()被调用），使用保存的rtsp_stats_list
+            if test_case.rtsp_stats_list:
+                stats_list = test_case.rtsp_stats_list
+                print(f"[生成报告] 使用保存的rtsp_stats_list，长度={len(stats_list)}")
+            else:
+                stats_list = [h.stats for h in self.rtsp_handlers]
+            
             print(f"[生成报告] stats_list长度={len(stats_list)}")
             for idx, stats in enumerate(stats_list):
                 fps_count = len(stats.fps_history) if stats.fps_history else 0
@@ -385,13 +411,18 @@ class TestEngine:
                 try:
                     self.gui.show_case_finished(test_case.case_id, test_case.case_name)
                 except Exception as gui_status_err:
-                    print(f"更新GUI状态失败: {gui_status_err}")
+                    print(f"[WARNING] 更新GUI状态失败: {gui_status_err}")
+            
+            # 无条件执行清理，即使出现任何异常也继续
             try:
                 self._cleanup_case()
-            except Exception as cleanup_err:
-                print(f"清理case资源时出错: {cleanup_err}")
+            except BaseException as cleanup_err:
+                # 捕获所有异常（包括系统异常和信号）
+                print(f"[WARNING] 清理case资源出错: {type(cleanup_err).__name__} - {cleanup_err}")
                 import traceback
                 traceback.print_exc()
+                # 继续执行，不抛出异常
+            
             print(f"[DEBUG] _execute_case的finally块执行完成，即将返回，is_running={self.is_running}")
 
     def _start_launch_thread(self, test_case: TestCase, event_callback):
@@ -491,8 +522,12 @@ class TestEngine:
         for i in range(test_case.stream_num):
             url = f"rtsp://{self.test_task.evb_ip}/live_{i}"
             print(f"[Engine] 创建Stream{i}，URL: {url}")
+            # 从GUI获取UDP/TCP协议设置
+            use_udp = False
+            if self.gui and hasattr(self.gui, 'use_udp_var'):
+                use_udp = self.gui.use_udp_var.get()
             # bNeedCtrlC模式使用简化模式：只检测是否收到数据，不解码显示
-            handler = RTSPHandler(i, url, simplified_mode=test_case.b_need_ctrl_c)
+            handler = RTSPHandler(i, url, simplified_mode=test_case.b_need_ctrl_c, use_udp=use_udp)
             print(f"[Engine] Stream{i}的RTSPHandler已创建，stream_id={handler.stream_id}")
             handler.add_event_callback(event_callback)
             
@@ -545,34 +580,39 @@ class TestEngine:
                         
                         # 更新视频帧
                         self.gui.update_video_frame(sid, frame)
-                        # 优化: 降低图表更新频率，每5秒更新一次（matplotlib绘图耗时较高）
-                        current_time = time.time()
-                        if current_time - last_chart_update_time[0] >= 5.0:
-                            last_chart_update_time[0] = current_time
-                            try:
-                                fps_values = [h.get_latest_fps() for h in self.rtsp_handlers]
-                                bitrate_values = [h.get_latest_bitrate() for h in self.rtsp_handlers]
-                                # 状态栏统计也改为5秒更新一次，使用统计周期数据
-                                for idx, handler in enumerate(self.rtsp_handlers):
-                                    try:
-                                        self.gui.update_stream_stats(handler.stream_id, fps_values[idx], bitrate_values[idx])
-                                    except Exception as stats_err:
-                                        print(f"更新状态栏统计失败: {stats_err}")
-                                # 获取最新的空闲内存（MB）
-                                free_mem_mb = 0
-                                if test_case.free_mem_history:
-                                    latest_mem = test_case.free_mem_history[-1]
-                                    free_mem_mb = latest_mem.get('free', 0) / 1024  # KB转MB
-                                # 传入rtsp_handlers让GUI直接读取history
-                                self.gui.update_chart(datetime.now(), fps_values, bitrate_values, free_mem_mb, self.rtsp_handlers)
-                            except Exception as chart_err:
-                                print(f"更新实时统计失败: {chart_err}")
+                        
+                        # 仅当fps或bitrate > 0时才更新统计信息（跳过占位符更新）
+                        if fps > 0 or bitrate > 0:
+                            # 优化: 降低图表更新频率，每5秒更新一次（matplotlib绘图耗时较高）
+                            current_time = time.time()
+                            if current_time - last_chart_update_time[0] >= 5.0:
+                                last_chart_update_time[0] = current_time
+                                try:
+                                    fps_values = [h.get_latest_fps() for h in self.rtsp_handlers]
+                                    bitrate_values = [h.get_latest_bitrate() for h in self.rtsp_handlers]
+                                    # 状态栏统计也改为5秒更新一次，使用统计周期数据
+                                    for idx, handler in enumerate(self.rtsp_handlers):
+                                        try:
+                                            self.gui.update_stream_stats(handler.stream_id, fps_values[idx], bitrate_values[idx])
+                                        except Exception as stats_err:
+                                            print(f"更新状态栏统计失败: {stats_err}")
+                                    # 获取最新的空闲内存（MB）
+                                    free_mem_mb = 0
+                                    if test_case.free_mem_history:
+                                        latest_mem = test_case.free_mem_history[-1]
+                                        free_mem_mb = latest_mem.get('free', 0) / 1024  # KB转MB
+                                    # 传入rtsp_handlers让GUI直接读取history
+                                    self.gui.update_chart(datetime.now(), fps_values, bitrate_values, free_mem_mb, self.rtsp_handlers)
+                                except Exception as chart_err:
+                                    print(f"更新实时统计失败: {chart_err}")
                         
                         # 更新独立视频窗口
                         if sid in self.video_windows:
                             try:
                                 self.video_windows[sid].update_frame(frame)
-                                self.video_windows[sid].update_stats(fps, bitrate)
+                                # 仅当fps或bitrate > 0时才更新窗口上的统计信息
+                                if fps > 0 or bitrate > 0:
+                                    self.video_windows[sid].update_stats(fps, bitrate)
                             except Exception as window_err:
                                 print(f"[Stream{sid}] 更新视频窗口失败: {window_err}")
                         # 窗口创建中或已销毁，静默跳过
@@ -835,6 +875,14 @@ class TestEngine:
                     print(f"[DEBUG] 检测到should_stop信号，提前终止等待")
                     break
                 elapsed = time.time() - start_time
+                
+                # 更新GUI显示剩余时间（每秒更新一次）
+                if self.gui and hasattr(self.gui, 'update_case_time'):
+                    try:
+                        self.gui.update_case_time(int(elapsed), test_case.hold_time)
+                    except Exception as e:
+                        print(f"[DEBUG] 更新GUI剩余时间失败: {e}")
+                
                 print(f"[DEBUG] 等待中: 已等待{elapsed:.1f}秒/{test_case.hold_time}秒")
                 time.sleep(1)
             print(f"[DEBUG] 等待完成: 总共等待了{elapsed:.1f}秒")
@@ -1010,120 +1058,99 @@ class TestEngine:
         """清理case资源"""
         print("清理case资源...")
         
-        # 第一步：停止内存采集线程（防止继续发送telnet命令）
-        print("停止内存采集线程...")
-        self.mem_monitor_running = False
-        self.mem_monitor_stop_event.set()  # 立即唤醒线程，不再等待time.sleep()
-        if self.mem_monitor_thread and self.mem_monitor_thread.is_alive():
-            print("等待内存采集线程结束（最多2秒）...")
-            self.mem_monitor_thread.join(timeout=2)
-            if self.mem_monitor_thread.is_alive():
-                print("警告: 内存采集线程未能在时限内结束")
-        self.mem_monitor_thread = None
-        self.mem_monitor_stop_event.clear()  # 重置Event以便下次使用
-        
-        # 第二步：暂不断开monitor_telnet（后续case可能还需使用）
-        # 仅停止监控线程，保持连接以便后续case使用
-        if self.monitor_telnet:
-            try:
-                print("停止monitor telnet监控线程...")
-                # 不调用disconnect，让后续case继续使用这个连接
-            except Exception as e:
-                print(f"停止monitor telnet监控失败: {e}")
-        
-        # 第三步：停止RTSP（释放拉流资源）
-        # 注意：使用后台线程停止，避免主线程被阻塞
-        print(f"停止{len(self.rtsp_handlers)}个RTSP处理线程...")
-        
-        import threading
-        stop_threads = []
-        for i, handler in enumerate(self.rtsp_handlers):
-            def stop_handler_in_thread(idx, h):
-                try:
-                    print(f"正在停止RTSP处理器 #{idx} (stream_id={h.stream_id})...")
-                    h.stop()
-                    print(f"RTSP处理器 #{idx} 已停止")
-                except Exception as e:
-                    print(f"停止RTSP处理器#{idx}失败: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
-            t = threading.Thread(target=stop_handler_in_thread, args=(i, handler), daemon=True)
-            t.start()
-            stop_threads.append((i, t))
-        
-        # 等待所有stop线程完成，每个最多等3秒
-        for idx, t in stop_threads:
-            t.join(timeout=3)
-            if t.is_alive():
-                print(f"[WARNING] RTSP处理器 #{idx} 停止超时，继续清理下一个")
-        
         try:
-            self.rtsp_handlers.clear()
-            print("所有RTSP处理线程已停止")
-        except Exception as e:
-            print(f"清空rtsp_handlers列表失败: {e}")
-
-        # 第四步：关闭本case打开的独立视频窗口
-        print(f"关闭case相关的视频窗口...（当前有{len(self.video_windows)}个窗口）")
-        self._close_video_windows()
-        print("视频窗口已全部关闭")
-        
-        # 第五步：停止并保存串口日志
-        if self.serial_handler and self.current_case:
-            print(f"关闭串口日志文件: {self.current_case.case_dir}/serial.log")
-            # disconnect会关闭日志文件
-            # 这里不调用disconnect，因为后续case还需要用串口
-            # 只关闭日志文件即可
-            if self.serial_handler.log_file_handle:
-                self.serial_handler.log_file_handle.flush()
-                self.serial_handler.log_file_handle.close()
-                self.serial_handler.log_file_handle = None
-                print("串口日志文件已关闭并保存")
-        
-        # 第六步：停止launch telnet
-        if self.launch_telnet:
+            # 第一步：停止内存采集线程（防止继续发送telnet命令）
             try:
-                self.launch_telnet.send_ctrl_c()
-                time.sleep(2)
+                print("停止内存采集线程...")
+                self.mem_monitor_running = False
+                self.mem_monitor_stop_event.set()
+                if self.mem_monitor_thread and self.mem_monitor_thread.is_alive():
+                    print("等待内存采集线程结束（最多2秒）...")
+                    self.mem_monitor_thread.join(timeout=2)
+                    if self.mem_monitor_thread.is_alive():
+                        print("[WARNING] 内存采集线程未能在时限内结束")
+                self.mem_monitor_thread = None
+                self.mem_monitor_stop_event.clear()
             except Exception as e:
-                print(f"停止launch telnet失败: {e}")
+                print(f"[WARNING] 停止内存采集出错: {type(e).__name__}")
             
-            # 获取ISP日志
+            # 第二步：停止RTSP（释放拉流资源）
             try:
-                isp_log = self.launch_telnet.execute_command("cat /tmp/log.txt")
-                if isp_log and self.current_case:
-                    isp_log_file = os.path.join(self.current_case.case_dir, "ispLog.txt")
-                    with open(isp_log_file, 'w', encoding='utf-8') as f:
-                        f.write(isp_log)
+                print(f"停止{len(self.rtsp_handlers)}个RTSP处理线程...")
+                
+                import threading
+                stop_threads = []
+                for i, handler in enumerate(self.rtsp_handlers):
+                    def stop_handler_in_thread(idx, h):
+                        try:
+                            print(f"正在停止RTSP处理器 #{idx} (stream_id={h.stream_id})...")
+                            h.stop()
+                            print(f"RTSP处理器 #{idx} 已停止")
+                        except BaseException as e:
+                            print(f"[WARNING] 停止RTSP处理器#{idx}失败: {type(e).__name__}")
+                    
+                    t = threading.Thread(target=stop_handler_in_thread, args=(i, handler), daemon=True)
+                    t.daemon = True
+                    t.start()
+                    stop_threads.append((i, t))
+                
+                # 等待所有stop线程完成，每个最多等8秒（给VideoCapture充足时间释放）
+                for idx, t in stop_threads:
+                    t.join(timeout=8)
+                    if t.is_alive():
+                        print(f"[WARNING] RTSP处理器 #{idx} 停止超时8秒，强制继续")
+                
+                self.rtsp_handlers.clear()
+                print("所有RTSP处理线程已停止")
             except Exception as e:
-                print(f"获取launch ISP日志失败: {e}")
+                print(f"[WARNING] 停止RTSP出错: {type(e).__name__}")
             
+            # 第三步：关闭视频窗口
             try:
-                self.launch_telnet.disconnect()
+                print(f"关闭case相关的视频窗口...（当前有{len(self.video_windows)}个窗口）")
+                self._close_video_windows()
+                print("视频窗口已全部关闭")
             except Exception as e:
-                print(f"断开launch telnet失败: {e}")
-            self.launch_telnet = None
-        
-        print("Case资源清理完成")
-
-        # 获取ISP日志（仅在monitor_telnet仍然可用时）
-        if self.monitor_telnet:
-            print("从monitor线程获取ISP日志...")
+                print(f"[WARNING] 关闭视频窗口出错: {type(e).__name__}")
+            
+            # 第四步：关闭串口日志
             try:
-                isp_log = self.monitor_telnet.execute_command("cat /tmp/log.txt")
-                if isp_log and self.current_case:
-                    isp_log_file = os.path.join(self.current_case.case_dir, "ispLog.txt")
-                    try:
+                if self.serial_handler and self.current_case:
+                    print(f"关闭串口日志文件")
+                    if self.serial_handler.log_file_handle:
+                        self.serial_handler.log_file_handle.flush()
+                        self.serial_handler.log_file_handle.close()
+                        self.serial_handler.log_file_handle = None
+                        print("串口日志文件已关闭并保存")
+            except Exception as e:
+                print(f"[WARNING] 关闭串口日志出错: {type(e).__name__}")
+            
+            # 第五步：停止launch telnet
+            try:
+                if self.launch_telnet:
+                    self.launch_telnet.send_ctrl_c()
+                    time.sleep(2)
+                    self.launch_telnet.disconnect()
+                    self.launch_telnet = None
+                    print("launch telnet已断开")
+            except Exception as e:
+                print(f"[WARNING] 停止launch telnet出错: {type(e).__name__}")
+            
+            # 第六步：收集ISP日志
+            try:
+                if self.monitor_telnet:
+                    print("从monitor线程获取ISP日志...")
+                    isp_log = self.monitor_telnet.execute_command("cat /tmp/log.txt")
+                    if isp_log and self.current_case:
+                        isp_log_file = os.path.join(self.current_case.case_dir, "ispLog.txt")
                         with open(isp_log_file, 'w', encoding='utf-8') as f:
                             f.write(isp_log)
-                        print(f"ISP日志已保存: {isp_log_file}")
-                    except Exception as e:
-                        print(f"保存ISP日志失败: {e}")
+                        print(f"ISP日志已保存")
             except Exception as e:
-                print(f"获取ISP日志失败: {e}")
-        else:
-            print("[WARNING] monitor_telnet不可用，跳过ISP日志收集")
+                print(f"[WARNING] 获取ISP日志出错: {type(e).__name__}")
+        
+        finally:
+            print("[DEBUG] _cleanup_case()执行完毕")
     
     def _cleanup(self):
         """清理资源"""
@@ -1165,43 +1192,34 @@ class TestEngine:
         """关闭并清空独立视频窗口"""
         print(f"[DEBUG] _close_video_windows 开始，窗口数={len(self.video_windows)}")
         
-        import time
+        import threading
         
-        # 先集中处理所有窗口的标志，再销毁
+        # 异步关闭窗口，避免阻塞清理流程
         for stream_id in list(self.video_windows.keys()):
             window = self.video_windows.get(stream_id)
             if not window:
                 continue
             
-            print(f"[DEBUG] 正在关闭Stream{stream_id}的独立窗口...")
+            print(f"[DEBUG] 请求关闭Stream{stream_id}窗口...")
             
             try:
-                # 标记窗口关闭
-                window.is_closed = True
-                window.is_playing = False
-                
-                # 安全地销毁tkinter窗口
-                if window.root:
+                # 优先通过GUI主线程关闭窗口
+                if self.gui and hasattr(self.gui, 'root') and self.gui.root:
                     try:
-                        # 检查窗口是否还存在
-                        if window.root.winfo_exists():
-                            try:
-                                # 移除协议处理器防止再次触发
-                                window.root.protocol("WM_DELETE_WINDOW", lambda: None)
-                                # 尝试更新idle事件
-                                window.root.update_idletasks()
-                            except:
-                                pass
-                            
-                            # 销毁窗口
-                            window.root.destroy()
-                    except Exception as inner_e:
-                        print(f"[DEBUG] destroy失败，可能窗口已关闭: {inner_e}")
-                    finally:
-                        window.root = None
-                
-                print(f"[DEBUG] Stream{stream_id}窗口已关闭")
-                time.sleep(0.1)  # 给系统一点时间完成销毁
+                        self.gui.root.after(0, window.close)
+                        print(f"[DEBUG] Stream{stream_id}窗口关闭请求已提交")
+                    except Exception as gui_err:
+                        print(f"[DEBUG] 提交窗口关闭请求失败: {gui_err}")
+                else:
+                    # 没有GUI时，主线程直接关闭
+                    if threading.current_thread() is threading.main_thread():
+                        window.close()
+                        print(f"[DEBUG] Stream{stream_id}窗口已在主线程关闭")
+                    else:
+                        # 非主线程时仅标记，避免阻塞
+                        window.is_closed = True
+                        window.is_playing = False
+                        print(f"[DEBUG] Stream{stream_id}窗口已标记关闭")
             except Exception as e:
                 print(f"[ERROR] 关闭视频窗口{stream_id}失败: {e}")
         
@@ -1369,14 +1387,89 @@ class TestEngine:
                 if mem_total and mem_available is not None:
                     consecutive_failures = 0  # 重置失败计数
                     usage = (1 - mem_available / mem_total) * 100 if mem_total else 0
+                    current_time = datetime.now()
                     sample = {
-                        "timestamp": datetime.now(),
+                        "timestamp": current_time,
                         "free": mem_available,
                         "total": mem_total,
                         "usage": usage
                     }
                     test_case.free_mem_history.append(sample)
                     print(f"[内存监控] 采集成功: Free: {mem_available/1024:.2f}MB, Usage: {usage:.2f}%, 历史记录数: {len(test_case.free_mem_history)}")
+                    
+                    # 同时采集proc数据
+                    try:
+                        # 采集ISP统计数据
+                        isp_output = self.monitor_telnet.execute_command("cat /proc/isp_stat", wait_time=0.5)
+                        if isp_output and len(isp_output.strip()) > 0:
+                            isp_info = ProcParser.parse_isp_stat(isp_output)
+                            if isp_info:
+                                isp_info["timestamp"] = current_time
+                                test_case.isp_history.append(isp_info)
+                                print(f"[ISP监控] 采集成功: frameid={isp_info.get('frame_id')}, fps={isp_info.get('fps', 0):.2f}, 历史记录数: {len(test_case.isp_history)}")
+                        
+                        # 采集VI数据 - 可能有多个pipe，逐个存储
+                        vi_output = self.monitor_telnet.execute_command("cat /proc/mpp/vi", wait_time=0.5)
+                        if vi_output and len(vi_output.strip()) > 0:
+                            vi_result = ProcParser.parse_vi_info(vi_output)
+                            if vi_result and 'pipes' in vi_result and vi_result['pipes']:
+                                for pipe_info in vi_result['pipes']:
+                                    pipe_record = {
+                                        'timestamp': current_time,
+                                        'pipe_id': pipe_info.get('pipe_id', 0),
+                                        'fps': pipe_info.get('fps', 0),
+                                        'width': pipe_info.get('width', 0),
+                                        'height': pipe_info.get('height', 0)
+                                    }
+                                    test_case.vi_history.append(pipe_record)
+                                print(f"[VI监控] 采集成功: {len(vi_result['pipes'])}个pipe, 历史记录数: {len(test_case.vi_history)}")
+                        
+                        # 采集VPSS数据 - 可能有多个group/channel，逐个存储
+                        vpss_output = self.monitor_telnet.execute_command("cat /proc/mpp/vpss", wait_time=0.5)
+                        if vpss_output and len(vpss_output.strip()) > 0:
+                            vpss_result = ProcParser.parse_vpss_info(vpss_output)
+                            print(f"[VPSS调试] parse_vpss_info返回: {vpss_result}")
+                            if vpss_result and 'groups' in vpss_result and vpss_result['groups']:
+                                for group_info in vpss_result['groups']:
+                                    for channel_info in group_info.get('channels', []):
+                                        vpss_record = {
+                                            'timestamp': current_time,
+                                            'group_id': group_info.get('group_id', 0),
+                                            'channel_id': channel_info.get('channel_id', 0),
+                                            'fps': channel_info.get('fps', 0),
+                                            'send_ok': channel_info.get('send_ok', 0),  # 添加SendOk字段
+                                            'out_width': channel_info.get('width', 0),
+                                            'out_height': channel_info.get('height', 0)
+                                        }
+                                        test_case.vpss_history.append(vpss_record)
+                                print(f"[VPSS监控] 采集成功: {len(vpss_result['groups'])}个group, 历史记录数: {len(test_case.vpss_history)}")
+                            else:
+                                print(f"[VPSS调试] vpss_result为空或groups为空")
+                        
+                        # 采集VENC数据 - 可能有多个channel
+                        venc_output = self.monitor_telnet.execute_command("cat /proc/mpp/venc", wait_time=0.5)
+                        if venc_output and len(venc_output.strip()) > 0:
+                            venc_result = ProcParser.parse_venc_info(venc_output)
+                            print(f"[VENC调试] parse_venc_info返回: {venc_result}")
+                            if venc_result and 'channels' in venc_result and venc_result['channels']:
+                                for channel_info in venc_result['channels']:
+                                    venc_record = {
+                                        'timestamp': current_time,
+                                        'channel_id': channel_info.get('channel_id', 0),
+                                        'width': channel_info.get('width', 0),  # 编码宽度
+                                        'height': channel_info.get('height', 0),  # 编码高度
+                                        'start_ok': channel_info.get('start_ok', 0),  # 编码成功帧数
+                                        'fps': channel_info.get('fps', 0),
+                                        'frame_count': channel_info.get('frame_count', 0)
+                                    }
+                                    test_case.venc_history.append(venc_record)
+                                print(f"[VENC监控] 采集成功: {len(venc_result['channels'])}个channel, 历史记录数: {len(test_case.venc_history)}")
+                            else:
+                                print(f"[VENC调试] venc_result为空或channels为空")
+                    except Exception as proc_err:
+                        print(f"[Proc监控] 采集proc数据异常: {proc_err}")
+                        import traceback
+                        traceback.print_exc()
                     
                     # 更新GUI图表，传递空闲内存（MB）而非使用率（%）
                     if self.gui and self.rtsp_handlers:
@@ -1466,7 +1559,20 @@ class TestEngine:
             if t.is_alive():
                 print(f"[WARNING] RTSP处理器 #{idx} 停止超时，继续清理")
         
+        # 在清空rtsp_handlers之前，保存stats数据用于报告生成
         stats_list = [h.stats for h in self.rtsp_handlers] if self.rtsp_handlers else []
+        print(f"[STOP] 收集到stats_list，长度={len(stats_list)}")
+        if stats_list:
+            for idx, stats in enumerate(stats_list):
+                fps_count = len(stats.fps_history) if stats.fps_history else 0
+                bitrate_count = len(stats.bitrate_history) if stats.bitrate_history else 0
+                print(f"[STOP] stats_list[{idx}]: stream_id={stats.stream_id}, fps_count={fps_count}, bitrate_count={bitrate_count}")
+        
+        # 保存到current_case，以便_execute_case能够访问
+        if self.current_case:
+            self.current_case.rtsp_stats_list = stats_list
+            print(f"[STOP] 已保存stats_list到current_case.rtsp_stats_list")
+        
         self.rtsp_handlers.clear()
         print("所有RTSP处理线程已停止")
         
@@ -1489,6 +1595,7 @@ class TestEngine:
             except Exception as cleanup_err:
                 print(f"清理case资源时出错: {cleanup_err}")
 
+            print("[DEBUG] _cleanup_case()返回，准备生成case报告")
             # 为当前case生成报告（即使未完成）
             try:
                 print(f"为当前case生成报告: Case {self.current_case.case_id}")
@@ -1514,14 +1621,89 @@ class TestEngine:
                         print(f"保存图表截图失败: {chart_err}")
             except Exception as report_err:
                 print(f"生成中断报告失败: {report_err}")
-
-            # 为当前task生成报告（即使中断）
+        
+        print("[DEBUG] stop()方法即将生成task报告")
+        
+        # 写入日志文件以确保追踪
+        try:
+            log_path = "stop_method_execution.log"
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(f"[{datetime.now()}] Reached task report section in stop()\n")
+                f.flush()
+        except:
+            pass
+        
+        # 为当前task生成报告（无论current_case是否存在，都必须生成）
+        try:
+            self.test_task.end_time = datetime.now()
+            print(f"[Task报告] 开始生成task报告")
+            
             try:
-                self.test_task.end_time = datetime.now()
-                print(f"[Task报告] 开始生成task报告(中断)，task_dir={self.test_task.task_dir}")
-                ReportGenerator.generate_task_report(self.test_task, self.test_task.task_dir)
+                log_path = "stop_method_execution.log"
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(f"[{datetime.now()}] About to set end_time\n")
+                    f.flush()
+            except:
+                pass
+            
+            # 确定task_dir：优先使用self.test_task.task_dir，否则从current_case推导
+            task_dir = self.test_task.task_dir
+            if not task_dir and self.current_case:
+                # 从case_dir推导task_dir（case_dir = task_dir/case_N）
+                case_dir = self.current_case.case_dir
+                if case_dir:
+                    task_dir = os.path.dirname(case_dir)
+            
+            print(f"[Task报告] task_dir={task_dir}")
+            
+            try:
+                log_path = "stop_method_execution.log"
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(f"[{datetime.now()}] task_dir={task_dir}, is_dir={os.path.isdir(task_dir) if task_dir else 'N/A'}\n")
+                    f.flush()
+            except:
+                pass
+            
+            if task_dir and isinstance(task_dir, str) and os.path.isdir(task_dir):
+                print(f"[Task报告] task_dir有效，准备生成task_report.md...")
+                
+                try:
+                    log_path = "stop_method_execution.log"
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(f"[{datetime.now()}] Calling ReportGenerator.generate_task_report()\n")
+                        f.flush()
+                except:
+                    pass
+                
+                ReportGenerator.generate_task_report(self.test_task, task_dir)
                 print(f"[Task报告] task报告生成完成(中断)")
-            except Exception as task_report_err:
-                print(f"[Task报告] 生成task报告失败(中断): {task_report_err}")
-                import traceback
-                traceback.print_exc()
+                
+                try:
+                    log_path = "stop_method_execution.log"
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(f"[{datetime.now()}] task_report generation completed successfully\n")
+                        f.flush()
+                except:
+                    pass
+            else:
+                print(f"[Task报告] task_dir无效或不存在: {task_dir}")
+                
+                try:
+                    log_path = "stop_method_execution.log"
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(f"[{datetime.now()}] task_dir invalid or not a directory: {task_dir}\n")
+                        f.flush()
+                except:
+                    pass
+        except Exception as task_report_err:
+            print(f"[Task报告] 生成task报告失败: {task_report_err}")
+            import traceback
+            traceback.print_exc()
+            
+            try:
+                log_path = "stop_method_execution.log"
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(f"[{datetime.now()}] Exception in task report: {task_report_err}\n")
+                    f.flush()
+            except:
+                pass

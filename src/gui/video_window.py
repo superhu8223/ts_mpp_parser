@@ -20,6 +20,8 @@ except ImportError:
 
 class VideoWindow:
     """单个RTSP流播放窗口"""
+    DISPLAY_WIDTH = 640
+    DISPLAY_HEIGHT = 360
     
     def __init__(self, stream_id: int, url: str, task_name: str = "", on_close_callback=None):
         print(f"[VideoWindow{stream_id}] 初始化窗口...")
@@ -48,6 +50,9 @@ class VideoWindow:
         self.total_frame_time_max = 0.0
         self.total_frame_count = 0
         self.last_perf_log_time = time.time()
+        self.current_fps = 0.0
+        self.current_bitrate = 0.0
+        self.source_resolution = None  # (w, h)
         
         # ✅ 修复: 创建Toplevel窗口而非独立Tk实例，共享主窗口的mainloop
         print(f"[VideoWindow{stream_id}] 创建Tkinter窗口...")
@@ -57,10 +62,10 @@ class VideoWindow:
         # 设置窗口初始大小和位置：在主界面右边上下排布
         # 主界面假设为1200x800，在右边放置视频窗口
         # stream_id为0放上方，stream_id为1放下方
-        initial_width = 650
-        initial_height = 550
+        initial_width = self.DISPLAY_WIDTH + 20
+        initial_height = self.DISPLAY_HEIGHT + 150
         x_pos = 1220  # 主界面(1200)的右边
-        y_pos = 50 + (stream_id * 600)  # stream_id=0: y=50, stream_id=1: y=650
+        y_pos = 50 + (stream_id * (self.DISPLAY_HEIGHT + 200))  # 上下排布
         
         self.root.geometry(f"{initial_width}x{initial_height}+{x_pos}+{y_pos}")
         # 设置窗口关闭协议
@@ -92,7 +97,7 @@ class VideoWindow:
         url_label.pack(side=tk.LEFT, padx=5, pady=3)
         
         # FPS和码率
-        self.stats_label = tk.Label(status_frame, text="FPS: 0.00 | Bitrate: 0.00 kbps", 
+        self.stats_label = tk.Label(status_frame, text="FPS: 0.00 | Bitrate: 0.00 kbps | Src: --x--", 
                                     font=("Arial", 9), fg="green")
         self.stats_label.pack(side=tk.LEFT, padx=5, pady=3)
         
@@ -121,6 +126,8 @@ class VideoWindow:
         self.video_label = tk.Label(self.root, text="等待视频...", 
                                    bg="black", fg="white", font=("Arial", 12))
         self.video_label.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        # 固定显示区域大小
+        self.video_label.config(width=self.DISPLAY_WIDTH, height=self.DISPLAY_HEIGHT)
         
         self.current_image = None  # 保持图像引用
         self.is_closed = False
@@ -150,13 +157,16 @@ class VideoWindow:
         """更新统计信息"""
         if self.is_closed or not self.root or not self.root.winfo_exists():
             return
+        self.current_fps = fps
+        self.current_bitrate = bitrate
         def _update():
             if self.is_closed or not self.root or not self.root.winfo_exists():
                 return
             try:
                 if self.stats_label.winfo_exists():
+                    res_text = f"{self.source_resolution[0]}x{self.source_resolution[1]}" if self.source_resolution else "--x--"
                     self.stats_label.config(
-                        text=f"FPS: {fps:.2f} | Bitrate: {bitrate:.2f} kbps"
+                        text=f"FPS: {fps:.2f} | Bitrate: {bitrate/1000:.2f} kbps | Src: {res_text}"
                     )
             except Exception:
                 return
@@ -167,7 +177,7 @@ class VideoWindow:
 
     def set_window_size(self, width: int, height: int):
         """设置窗口显示尺寸（用于统一所有窗口大小）"""
-        print(f"[VideoWindow{self.stream_id}] 设置窗口大小: {width}x{height}")
+        print(f"[VideoWindow{self.stream_id}] 设置窗口大小: {width}x{height} (忽略，固定为{self.DISPLAY_WIDTH}x{self.DISPLAY_HEIGHT})")
         if self.is_closed or not self.root or not self.root.winfo_exists():
             return
         def _set():
@@ -175,16 +185,16 @@ class VideoWindow:
                 return
             # 设置Label容器的大小
             if self.video_label.winfo_exists():
-                self.video_label.config(width=width, height=height)
+                self.video_label.config(width=self.DISPLAY_WIDTH, height=self.DISPLAY_HEIGHT)
             # 更新窗口大小，并调整位置确保不与UI重叠
             # stream_id为0放上方，stream_id为1放下方
             x_pos = 1220  # 主界面(1200)的右边
             # 减小窗口间距，避免第二个窗口超出屏幕
-            y_pos = 50 + (self.stream_id * (height + 50))  # 上下排布，中间间距50
-            final_height = height + 150  # +150用于UI边框和控制区
+            y_pos = 50 + (self.stream_id * (self.DISPLAY_HEIGHT + 200))  # 上下排布
+            final_height = self.DISPLAY_HEIGHT + 150  # +150用于UI边框和控制区
             try:
-                self.root.geometry(f"{width+20}x{final_height}+{x_pos}+{y_pos}")
-                print(f"[VideoWindow{self.stream_id}] 窗口已调整: 大小={width+20}x{final_height}, 位置=+{x_pos}+{y_pos}")
+                self.root.geometry(f"{self.DISPLAY_WIDTH+20}x{final_height}+{x_pos}+{y_pos}")
+                print(f"[VideoWindow{self.stream_id}] 窗口已调整: 大小={self.DISPLAY_WIDTH+20}x{final_height}, 位置=+{x_pos}+{y_pos}")
             except Exception:
                 return
         try:
@@ -194,7 +204,17 @@ class VideoWindow:
     
     def update_frame(self, frame):
         """显示视频帧"""
-        if self.is_closed or not self.root or not self.root.winfo_exists():
+        # 检查是否已标记关闭，如果是，关闭窗口
+        if self.is_closed:
+            if self.root and self.root.winfo_exists():
+                print(f"[VideoWindow{self.stream_id}] 检测到is_closed=True，正在关闭窗口...")
+                try:
+                    self.root.destroy()
+                except Exception as e:
+                    print(f"[VideoWindow{self.stream_id}] 销毁窗口失败: {e}")
+            return
+        
+        if not self.root or not self.root.winfo_exists():
             return
         if not self.is_playing:
             # 不播放时停止更新画面，保持当前显示
@@ -234,11 +254,22 @@ class VideoWindow:
             # 缩放到窗口大小
             if not self.video_label.winfo_exists():
                 return
-            label_width = max(self.video_label.winfo_width(), 320)
-            label_height = max(self.video_label.winfo_height(), 240)
+            label_width = self.DISPLAY_WIDTH
+            label_height = self.DISPLAY_HEIGHT
             current_window_size = (label_width, label_height)
             
             h, w = frame.shape[:2]
+            # 更新原始分辨率
+            if self.source_resolution != (w, h):
+                self.source_resolution = (w, h)
+                try:
+                    if self.stats_label.winfo_exists():
+                        res_text = f"{w}x{h}"
+                        self.stats_label.config(
+                            text=f"FPS: {self.current_fps:.2f} | Bitrate: {self.current_bitrate:.2f} kbps | Src: {res_text}"
+                        )
+                except Exception:
+                    pass
             aspect = w / h
             
             if label_width / label_height > aspect:

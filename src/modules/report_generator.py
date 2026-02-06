@@ -5,6 +5,9 @@
 生成测试case和task的Markdown报告、Excel报表，以及统计图图片
 """
 
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)  # 禁用matplotlib的UserWarning
+
 import os
 from datetime import datetime
 from typing import List
@@ -15,6 +18,9 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib.dates as mdates
 import matplotlib.cm as cm
 from matplotlib.colors import to_hex
+# 禁用所有matplotlib相关的警告
+warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='matplotlib')
 try:
     import openpyxl
     from openpyxl.styles import Font, Alignment, PatternFill
@@ -145,11 +151,18 @@ class ReportGenerator:
         # 生成Excel报表（无论是否为 bNeedCtrlC 模式，都生成以记录其他数据）
         if EXCEL_AVAILABLE:
             ReportGenerator._generate_case_excel(test_case, stream_stats_list, free_mem_history, case_dir)
+        else:
+            print(f"[警告] openpyxl库不可用，跳过Excel报表生成")
 
         # bNeedCtrlC模式下没有解码和统计数据，不生成图表
+        print(f"[报告生成] 检查是否生成图表: b_need_ctrl_c={test_case.b_need_ctrl_c}")
         if not test_case.b_need_ctrl_c:
             # 生成统计图图片
+            print(f"[报告生成] 开始生成统计图...")
             ReportGenerator._generate_case_chart(test_case, stream_stats_list, free_mem_history, case_dir)
+            print(f"[报告生成] 统计图生成完成")
+        else:
+            print(f"[报告生成] 跳过图表生成（bNeedCtrlC模式）")
     
     @staticmethod
     def generate_task_report(test_task: TestTask, task_dir: str):
@@ -198,13 +211,19 @@ class ReportGenerator:
             f.write(f"- **失败**: {failed_cases}\n")
             f.write(f"- **通过率**: {(passed_cases/total_cases*100 if total_cases > 0 else 0):.1f}%\n")
         
-        print(f"Task报告已生成: {report_path}")
+        print(f"[OK] Task报告已生成: {report_path}")
     
     @staticmethod
     def _generate_case_excel(test_case: TestCase, stream_stats_list: List[StreamStats],
                             free_mem_history: List, case_dir: str):
         """生成Case Excel报表"""
         excel_path = os.path.join(case_dir, "case_statistics.xlsx")
+        
+        # 调试输出：检查proc历史数据
+        print(f"[Excel生成] ISP历史记录数: {len(test_case.isp_history)}")
+        print(f"[Excel生成] VI历史记录数: {len(test_case.vi_history)}")
+        print(f"[Excel生成] VPSS历史记录数: {len(test_case.vpss_history)}")
+        print(f"[Excel生成] VENC历史记录数: {len(test_case.venc_history)}")
         
         try:
             wb = openpyxl.Workbook()
@@ -241,51 +260,60 @@ class ReportGenerator:
             ws_events.column_dimensions['D'].width = 20
             ws_events.column_dimensions['E'].width = 80
             
-            # Sheet2: 统计帧率
-            ws_fps = wb.create_sheet("统计帧率")
-            ws_fps.append(["Stream ID", "URL", "时间", "帧率(fps)"])
-            for cell in ws_fps[1]:
+            # Sheet2: RTSP统计（合并帧率和码率）
+            ws_rtsp = wb.create_sheet("RTSP统计")
+            ws_rtsp.append(["Stream ID", "URL", "时间", "帧率(fps)", "码率(kbps)"])
+            for cell in ws_rtsp[1]:
                 cell.fill = header_fill
                 cell.font = header_font
                 cell.alignment = Alignment(horizontal="center", vertical="center")
             
+            # 将所有时间戳收集为一个有序集合
+            all_timestamps = set()
             for stats in stream_stats_list:
                 for data in stats.fps_history:
-                    ws_fps.append([
-                        stats.stream_id,
-                        stats.url,
-                        data.timestamp.strftime('%Y-%m-%d %H:%M:%S') if data.timestamp else '',
-                        round(data.value, 2)
-                    ])
-            
-            ws_fps.column_dimensions['A'].width = 12
-            ws_fps.column_dimensions['B'].width = 40
-            ws_fps.column_dimensions['C'].width = 20
-            ws_fps.column_dimensions['D'].width = 15
-            
-            # Sheet3: 统计码率
-            ws_bitrate = wb.create_sheet("统计码率")
-            ws_bitrate.append(["Stream ID", "URL", "时间", "码率(kbps)"])
-            for cell in ws_bitrate[1]:
-                cell.fill = header_fill
-                cell.font = header_font
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-            
-            for stats in stream_stats_list:
+                    if data.timestamp:
+                        all_timestamps.add(data.timestamp)
                 for data in stats.bitrate_history:
-                    ws_bitrate.append([
-                        stats.stream_id,
-                        stats.url,
-                        data.timestamp.strftime('%Y-%m-%d %H:%M:%S') if data.timestamp else '',
-                        round(data.value, 2)
-                    ])
+                    if data.timestamp:
+                        all_timestamps.add(data.timestamp)
             
-            ws_bitrate.column_dimensions['A'].width = 12
-            ws_bitrate.column_dimensions['B'].width = 40
-            ws_bitrate.column_dimensions['C'].width = 20
-            ws_bitrate.column_dimensions['D'].width = 15
+            # 按时间排序
+            sorted_timestamps = sorted(all_timestamps)
             
-            # Sheet4: free空闲内存
+            # 为每个 stream 和时间戳创建一行
+            for stats in stream_stats_list:
+                # 构建时间戳到帧率的映射
+                fps_map = {data.timestamp: data.value for data in stats.fps_history if data.timestamp}
+                # 构建时间戳到码率的映射
+                bitrate_map = {data.timestamp: data.value for data in stats.bitrate_history if data.timestamp}
+                
+                # 获取该stream的所有时间戳（fps或bitrate的并集）
+                stream_timestamps = set(fps_map.keys()) | set(bitrate_map.keys())
+                
+                for timestamp in sorted(stream_timestamps):
+                    fps_value = fps_map.get(timestamp)
+                    bitrate_value = bitrate_map.get(timestamp)
+                    
+                    # 只有当至少有一个值时才添加行
+                    if fps_value is not None or bitrate_value is not None:
+                        # 码率从bps转换为kbps
+                        bitrate_kbps = bitrate_value / 1000 if bitrate_value is not None else None
+                        ws_rtsp.append([
+                            stats.stream_id,
+                            stats.url,
+                            timestamp.strftime('%Y-%m-%d %H:%M:%S') if timestamp else '',
+                            round(fps_value, 2) if fps_value is not None else '',
+                            round(bitrate_kbps, 2) if bitrate_kbps is not None else ''
+                        ])
+            
+            ws_rtsp.column_dimensions['A'].width = 12
+            ws_rtsp.column_dimensions['B'].width = 40
+            ws_rtsp.column_dimensions['C'].width = 20
+            ws_rtsp.column_dimensions['D'].width = 15
+            ws_rtsp.column_dimensions['E'].width = 15
+            
+            # Sheet3: free空闲内存
             ws_mem = wb.create_sheet("free空闲内存")
             ws_mem.append(["时间", "空闲内存(KB)", "总内存(KB)", "使用率(%)"])
             for cell in ws_mem[1]:
@@ -307,11 +335,140 @@ class ReportGenerator:
             ws_mem.column_dimensions['C'].width = 18
             ws_mem.column_dimensions['D'].width = 15
             
+            # Sheet4: ISP统计
+            if test_case.isp_history and len(test_case.isp_history) > 0:
+                print(f"[Excel生成] 开始创建ISP统计sheet，记录数={len(test_case.isp_history)}")
+                ws_isp = wb.create_sheet("ISP统计")
+                isp_headers = ["时间", "FrameID", "帧率(fps)", "模式"]
+                ws_isp.append(isp_headers)
+                for cell in ws_isp[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                
+                for isp_data in test_case.isp_history:
+                    if isinstance(isp_data, dict):
+                        ws_isp.append([
+                            isp_data.get('timestamp', '') if isinstance(isp_data.get('timestamp'), str) else (isp_data.get('timestamp').strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if isp_data.get('timestamp') else ''),
+                            isp_data.get('frame_id', 0),
+                            round(isp_data.get('fps', 0), 2),
+                            isp_data.get('mode', '')
+                        ])
+                
+                ws_isp.column_dimensions['A'].width = 22
+                ws_isp.column_dimensions['B'].width = 12
+                ws_isp.column_dimensions['C'].width = 15
+                ws_isp.column_dimensions['D'].width = 20
+                print(f"[Excel生成] ISP统计sheet已创建，共{len(test_case.isp_history)}行数据")
+            else:
+                print(f"[Excel生成] ISP历史数据为空，跳过ISP统计sheet创建")
+            
+            # Sheet5: VI统计
+            if test_case.vi_history and len(test_case.vi_history) > 0:
+                print(f"[Excel生成] 开始创建VI统计sheet，记录数={len(test_case.vi_history)}")
+                ws_vi = wb.create_sheet("VI统计")
+                vi_headers = ["时间", "Pipe ID", "帧率(fps)", "分辨率宽", "分辨率高"]
+                ws_vi.append(vi_headers)
+                for cell in ws_vi[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                
+                for vi_data in test_case.vi_history:
+                    if isinstance(vi_data, dict):
+                        ws_vi.append([
+                            vi_data.get('timestamp', '') if isinstance(vi_data.get('timestamp'), str) else (vi_data.get('timestamp').strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if vi_data.get('timestamp') else ''),
+                            vi_data.get('pipe_id', 0),
+                            round(vi_data.get('fps', 0), 2),
+                            vi_data.get('width', 0),
+                            vi_data.get('height', 0)
+                        ])
+                
+                ws_vi.column_dimensions['A'].width = 22
+                ws_vi.column_dimensions['B'].width = 12
+                ws_vi.column_dimensions['C'].width = 15
+                ws_vi.column_dimensions['D'].width = 15
+                ws_vi.column_dimensions['E'].width = 15
+                print(f"[Excel生成] VI统计sheet已创建，共{len(test_case.vi_history)}行数据")
+            else:
+                print(f"[Excel生成] VI历史数据为空，跳过VI统计sheet创建")
+            
+            # Sheet6: VPSS统计
+            if test_case.vpss_history and len(test_case.vpss_history) > 0:
+                print(f"[Excel生成] 开始创建VPSS统计sheet，记录数={len(test_case.vpss_history)}")
+                ws_vpss = wb.create_sheet("VPSS统计")
+                vpss_headers = ["时间", "Group ID", "Channel ID", "帧率(fps)", "输出帧数", "输出宽", "输出高"]
+                ws_vpss.append(vpss_headers)
+                for cell in ws_vpss[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                
+                for vpss_data in test_case.vpss_history:
+                    if isinstance(vpss_data, dict):
+                        ws_vpss.append([
+                            vpss_data.get('timestamp', '') if isinstance(vpss_data.get('timestamp'), str) else (vpss_data.get('timestamp').strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if vpss_data.get('timestamp') else ''),
+                            vpss_data.get('group_id', 0),
+                            vpss_data.get('channel_id', 0),
+                            round(vpss_data.get('fps', 0), 2),
+                            vpss_data.get('send_ok', 0),  # 通道输出帧数
+                            vpss_data.get('out_width', 0),
+                            vpss_data.get('out_height', 0)
+                        ])
+                
+                ws_vpss.column_dimensions['A'].width = 22
+                ws_vpss.column_dimensions['B'].width = 12
+                ws_vpss.column_dimensions['C'].width = 14
+                ws_vpss.column_dimensions['D'].width = 15
+                ws_vpss.column_dimensions['E'].width = 15
+                ws_vpss.column_dimensions['F'].width = 12
+                ws_vpss.column_dimensions['G'].width = 12
+                print(f"[Excel生成] VPSS统计sheet已创建，共{len(test_case.vpss_history)}行数据")
+            else:
+                print(f"[Excel生成] VPSS历史数据为空，跳过VPSS统计sheet创建")
+            
+            # Sheet7: VENC统计
+            if test_case.venc_history and len(test_case.venc_history) > 0:
+                print(f"[Excel生成] 开始创建VENC统计sheet，记录数={len(test_case.venc_history)}")
+                ws_venc = wb.create_sheet("VENC统计")
+                venc_headers = ["时间", "Channel ID", "编码宽", "编码高", "编码成功帧数", "帧率(fps)", "总帧数"]
+                ws_venc.append(venc_headers)
+                for cell in ws_venc[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                
+                for venc_data in test_case.venc_history:
+                    if isinstance(venc_data, dict):
+                        ws_venc.append([
+                            venc_data.get('timestamp', '') if isinstance(venc_data.get('timestamp'), str) else (venc_data.get('timestamp').strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if venc_data.get('timestamp') else ''),
+                            venc_data.get('channel_id', 0),
+                            venc_data.get('width', 0),  # 编码宽度
+                            venc_data.get('height', 0),  # 编码高度
+                            venc_data.get('start_ok', 0),  # 编码成功帧数
+                            round(venc_data.get('fps', 0), 2),
+                            venc_data.get('frame_count', 0)  # 总帧数
+                        ])
+                
+                ws_venc.column_dimensions['A'].width = 22
+                ws_venc.column_dimensions['B'].width = 14
+                ws_venc.column_dimensions['C'].width = 12
+                ws_venc.column_dimensions['D'].width = 12
+                ws_venc.column_dimensions['E'].width = 15
+                ws_venc.column_dimensions['F'].width = 15
+                ws_venc.column_dimensions['G'].width = 15
+                print(f"[Excel生成] VENC统计sheet已创建，共{len(test_case.venc_history)}行数据")
+            else:
+                print(f"[Excel生成] VENC历史数据为空，跳过VENC统计sheet创建")
+            
+            print(f"[Excel生成] 准备保存Excel文件到: {excel_path}")
             wb.save(excel_path)
             print(f"Excel报表已生成: {excel_path}")
             
         except Exception as e:
-            print(f"生成Excel报表失败: {e}")
+            print(f"[ERROR] 生成Excel报表失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     @staticmethod
     def _generate_case_chart(test_case: TestCase, stream_stats_list: List[StreamStats],
@@ -518,14 +675,17 @@ class ReportGenerator:
             if fps_plot_count > 0:
                 ax_fps.legend(loc='upper left', fontsize=10, framealpha=0.95)
 
-            fig.tight_layout()
+            # 禁用tight_layout的警告
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=UserWarning)
+                fig.tight_layout()
 
             chart_path = os.path.join(case_dir, 'case_chart.png')
             fig.savefig(chart_path, dpi=100, bbox_inches='tight')
             fig.clear()
-            print(f"统计图已生成: {chart_path}")
+            print(f"[OK] 统计图已生成: {chart_path}")
         except Exception as e:
-            print(f"生成统计图失败: {e}")
+            print(f"[FAIL] 生成统计图失败: {e}")
             import traceback
             traceback.print_exc()
 

@@ -31,6 +31,7 @@ class VideoWindow:
         self.is_running = True
         self.current_fps = 0.0
         self.current_bitrate = 0.0
+        self.source_resolution = None  # (w, h)
         self.show_video = True  # 是否显示视频内容（默认显示）
         # 缩放耗时统计
         self.resize_time_sum = 0.0
@@ -90,6 +91,8 @@ class VideoWindow:
             
             # 在显示前添加统计信息到画面
             h, w = frame.shape[:2]
+            if self.source_resolution != (w, h):
+                self.source_resolution = (w, h)
             resize_start = time.time()
             display_frame = cv2.resize(frame, (self.WINDOW_WIDTH, self.WINDOW_HEIGHT))
             resize_cost_ms = (time.time() - resize_start) * 1000.0
@@ -311,10 +314,11 @@ class VideoWindow:
         cv2.putText(frame, f"Stream{self.stream_id}", 
                    (5, 15), font, font_scale, font_color, thickness)
         
-        # 显示FPS和码率
-        fps_text = f"FPS: {self.current_fps:.1f} | Bitrate: {self.current_bitrate/1000:.0f} Mbps"
-        cv2.putText(frame, fps_text, 
-                   (5, 30), font, font_scale, font_color, thickness)
+        # 显示FPS、码率和原始分辨率
+        res_text = f"{self.source_resolution[0]}x{self.source_resolution[1]}" if self.source_resolution else "--x--"
+        fps_text = f"FPS: {self.current_fps:.1f} | Bitrate: {self.current_bitrate/1000:.0f} kbps"
+        cv2.putText(frame, f"Src: {res_text}", 
+               (5, 45), font, font_scale, font_color, thickness)
     
     def _create_stats_only_frame(self):
         """创建仅包含状态栏的帧（不显示视频）"""
@@ -341,13 +345,18 @@ class VideoWindow:
                        font, font_scale, font_color, thickness)
             
             # Bitrate
-            text = f"Bitrate: {self.current_bitrate/1000:.2f} Mbps"
+            text = f"Bitrate: {self.current_bitrate/1000:.2f} kbps"
             cv2.putText(stats_frame, text, (self.WINDOW_WIDTH//2 - 100, y_offset + 60), 
                        font, font_scale, font_color, thickness)
             
+            # 原始分辨率
+            res_text = f"Src: {self.source_resolution[0]}x{self.source_resolution[1]}" if self.source_resolution else "Src: --x--"
+            cv2.putText(stats_frame, res_text, (self.WINDOW_WIDTH//2 - 100, y_offset + 90), 
+                       font, 0.45, font_color, thickness)
+            
             # 提示信息
             text = "(Video display disabled)"
-            cv2.putText(stats_frame, text, (self.WINDOW_WIDTH//2 - 120, y_offset + 100), 
+            cv2.putText(stats_frame, text, (self.WINDOW_WIDTH//2 - 120, y_offset + 120), 
                        font, 0.4, (128, 128, 128), 1)
             
             return stats_frame

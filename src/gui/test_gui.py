@@ -48,6 +48,8 @@ class TestGUI:
         self.last_status_update_time = 0  # 状态栏最后更新时间，用于限制更新频率
         self.runtime_events: List = []  # 收集的runtime事件
         self.video_checkboxes: Dict[int, Dict] = {}  # 存储复选框 {stream_id: {'var': BooleanVar, 'checkbox': Checkbutton}}
+        self.current_case_id = 0  # 当前执行的case ID
+        self.current_case_name = None  # 当前执行的case名称
         
         self._create_widgets()
         
@@ -92,6 +94,24 @@ class TestGUI:
             font=("Arial", 10, "bold")
         )
         self.video_control_frame.pack(side=tk.LEFT, padx=20, fill=tk.X, expand=False)
+        
+        # RTSP协议控制区
+        self.protocol_frame = tk.LabelFrame(
+            control_frame,
+            text="RTSP协议",
+            font=("Arial", 10, "bold")
+        )
+        self.protocol_frame.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=False)
+        
+        self.use_udp_var = tk.BooleanVar(value=False)  # 默认使用TCP
+        self.udp_checkbox = tk.Checkbutton(
+            self.protocol_frame,
+            text="使用UDP",
+            variable=self.use_udp_var,
+            command=self._on_protocol_change,
+            font=("Arial", 10)
+        )
+        self.udp_checkbox.pack(side=tk.LEFT, padx=5, pady=2)
         
         # 主内容区
         main_frame = tk.Frame(self.root)
@@ -168,10 +188,16 @@ class TestGUI:
         
     def on_start(self):
         """启动按钮回调"""
+        # 重新激活GUI（用于多次启动/停止）
+        self.gui_active = True
+        
         self.is_running = True
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.status_label.config(text="状态: 运行中")
+        
+        # 隐藏RTSP协议控制区（测试运行中不允许修改协议）
+        self.protocol_frame.pack_forget()
         
         if self.test_engine:
             # 在新线程中运行测试
@@ -180,41 +206,62 @@ class TestGUI:
     
     def init_video_controls(self, stream_count: int):
         """初始化视频流控制复选框"""
-        # 清除旧的复选框
-        for widget in self.video_control_frame.winfo_children():
-            widget.destroy()
+        # 清除旧的复选框（使用更强健的方式）
+        try:
+            for widget in list(self.video_control_frame.winfo_children()):
+                try:
+                    widget.destroy()
+                except tk.TclError:
+                    pass  # widget已被销毁
+        except tk.TclError:
+            pass  # frame已被销毁
+        
         self.video_checkboxes.clear()
         
         # 为每个视频流创建复选框
         for i in range(stream_count):
-            var = tk.BooleanVar(value=True)  # 默认选中
-            cb = tk.Checkbutton(
-                self.video_control_frame,
-                text=f"Stream{i}",
-                variable=var,
-                command=lambda sid=i: self._on_video_checkbox_changed(sid),
-                font=("Arial", 9)
-            )
-            cb.pack(side=tk.LEFT, padx=5)
-            self.video_checkboxes[i] = {'var': var, 'checkbox': cb}
+            try:
+                var = tk.BooleanVar(value=True)  # 默认选中
+                cb = tk.Checkbutton(
+                    self.video_control_frame,
+                    text=f"Stream{i}",
+                    variable=var,
+                    command=lambda sid=i: self._on_video_checkbox_changed(sid),
+                    font=("Arial", 9)
+                )
+                cb.pack(side=tk.LEFT, padx=5)
+                self.video_checkboxes[i] = {'var': var, 'checkbox': cb}
+            except tk.TclError:
+                print(f"[GUI] 创建Stream{i}复选框失败（可能GUI已关闭）")
+                break
         
         print(f"[GUI] 已初始化{stream_count}个视频流控制复选框")
     
     def init_ctrl_c_display(self):
         """bNeedCtrlC模式：初始化Ctrl+C次数显示"""
-        # 清除旧的控件
-        for widget in self.video_control_frame.winfo_children():
-            widget.destroy()
+        # 清除旧的控件（使用更强健的方式）
+        try:
+            for widget in list(self.video_control_frame.winfo_children()):
+                try:
+                    widget.destroy()
+                except tk.TclError:
+                    pass  # widget已被销毁
+        except tk.TclError:
+            pass  # frame已被销毁
+        
         self.video_checkboxes.clear()
         
         # 创建Ctrl+C次数显示标签
-        self.ctrl_c_label = tk.Label(
-            self.video_control_frame,
-            text="Ctrl+C次数: 0",
-            font=("Arial", 10, "bold"),
-            fg="blue"
-        )
-        self.ctrl_c_label.pack(side=tk.LEFT, padx=10)
+        try:
+            self.ctrl_c_label = tk.Label(
+                self.video_control_frame,
+                text="Ctrl+C次数: 0",
+                font=("Arial", 10, "bold"),
+                fg="blue"
+            )
+            self.ctrl_c_label.pack(side=tk.LEFT, padx=10)
+        except tk.TclError:
+            print("[GUI] 创建Ctrl+C次数显示失败（可能GUI已关闭）")
         
         print("[GUI] 已初始化Ctrl+C次数显示")
     
@@ -276,8 +323,21 @@ class TestGUI:
             return
 
         self.stop_button.config(state=tk.DISABLED)
-        self.start_button.config(state=tk.DISABLED)
+        self.start_button.config(state=tk.NORMAL)
         self.status_label.config(text="状态: 已停止")
+        
+        # 隐藏RTSP协议控制区和视频播放控制区
+        try:
+            self.protocol_frame.pack_forget()
+            print("[GUI] 已隐藏RTSP协议控制区")
+        except tk.TclError:
+            pass  # frame已被销毁
+        
+        try:
+            self.video_control_frame.pack_forget()
+            print("[GUI] 已隐藏视频播放控制区")
+        except tk.TclError:
+            pass  # frame已被销毁
 
         if self.is_running and self.test_engine:
             print("[GUI] 停止测试引擎...")
@@ -335,10 +395,40 @@ class TestGUI:
 
     def show_case_status(self, case_id: int, case_name: Optional[str] = None):
         """在状态栏显示当前执行的case信息"""
+        # 保存当前case的信息用于update_case_time使用
+        self.current_case_id = case_id
+        self.current_case_name = case_name
         label = f"状态: 运行中 | Case {case_id}"
         if case_name:
             label += f" - {case_name}"
         self.update_status(label)
+    
+    def update_case_time(self, elapsed: int, hold_time):
+        """更新状态栏显示当前case的剩余时间"""
+        if not self.gui_active:
+            return
+        
+        # 计算剩余时间
+        if hold_time and isinstance(hold_time, (int, float)) and hold_time > 0:
+            remaining = int(hold_time - elapsed)
+            remaining = max(0, remaining)  # 确保不会显示负数
+            label = f"状态: 运行中 | Case {self.current_case_id}"
+            if self.current_case_name:
+                label += f" - {self.current_case_name}"
+            label += f" | 已用时: {elapsed}s | 剩余: {remaining}s"
+        else:
+            label = f"状态: 运行中 | Case {self.current_case_id}"
+            if self.current_case_name:
+                label += f" - {self.current_case_name}"
+            label += f" | 已用时: {elapsed}s | 模式: 长稳"
+        
+        def _update():
+            if self.gui_active:
+                self.status_label.config(text=label)
+        try:
+            self.root.after(0, _update)
+        except Exception:
+            pass  # GUI已关闭
 
     def show_case_finished(self, case_id: int, case_name: Optional[str] = None):
         """在状态栏显示case完成信息"""
@@ -372,6 +462,18 @@ class TestGUI:
             self.root.after(0, _update)
         except Exception:
             pass  # GUI已关闭
+    
+    def _on_protocol_change(self):
+        """协议切换回调"""
+        use_udp = self.use_udp_var.get()
+        protocol = 'UDP' if use_udp else 'TCP'
+        print(f"[GUI] RTSP传输协议切换为: {protocol}")
+        
+        # 如果测试正在运行，动态更新所有RTSP handler的协议设置
+        if self.test_engine and hasattr(self.test_engine, 'rtsp_handlers'):
+            for handler in self.test_engine.rtsp_handlers:
+                if handler:
+                    handler.set_transport(use_udp)
     
     def reset_chart(self):
         """重置图表数据（用于切换case时）"""
@@ -619,6 +721,16 @@ class TestGUI:
             self.ax_fps.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
             self.ax_mem.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
             
+            # 设置x轴显示范围，确保所有数据点都可见
+            if time_numeric and len(time_numeric) > 0:
+                x_min = min(time_numeric)
+                x_max = max(time_numeric)
+                # 添加5%的边距，让数据点不紧贴边缘
+                x_margin = (x_max - x_min) * 0.05 if x_max > x_min else 0.0001
+                self.ax_bitrate.set_xlim(x_min - x_margin, x_max + x_margin)
+                self.ax_fps.set_xlim(x_min - x_margin, x_max + x_margin)
+                self.ax_mem.set_xlim(x_min - x_margin, x_max + x_margin)
+            
             # 添加图例
             if self.ax_bitrate.get_legend_handles_labels()[0]:
                 self.ax_bitrate.legend(loc='upper right', fontsize=8, framealpha=0.8)
@@ -706,5 +818,12 @@ class TestGUI:
     
     def run(self):
         """运行GUI主循环"""
-        self.root.protocol("WM_DELETE_WINDOW", self.on_stop)
-        self.root.mainloop()
+        try:
+            self.root.protocol("WM_DELETE_WINDOW", self.on_stop)
+            print("[GUI] mainloop启动...")
+            self.root.mainloop()
+            print("[GUI] mainloop已退出")
+        except Exception as e:
+            print(f"[GUI] mainloop异常: {type(e).__name__} - {e}")
+            import traceback
+            traceback.print_exc()

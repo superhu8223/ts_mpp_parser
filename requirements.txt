@@ -1,13 +1,16 @@
-# TsMpp自动化测试系统依赖包
+# TsMpp automated test system dependencies
 
-# 串口通信
+# Serial communication
 pyserial>=3.5
 
-# OpenCV用于RTSP拉流和图像处理
+# OpenCV for RTSP streaming and image processing
 opencv-python>=4.8.0
 
-# 数据可视化
+# Data visualization
 matplotlib>=3.7.0
 
-# 文档处理（用于读取.docx文档）
+# Excel report generation
+openpyxl>=3.1.2
+
+# Document processing (for reading .docx documents)
 python-docx>=0.8.11

@@ -75,6 +75,11 @@ class TestCase:
     # 运行时数据
     event_list: List[RuntimeEvent] = field(default_factory=list)  # 事件队列
     free_mem_history: List[dict] = field(default_factory=list)  # 空闲内存历史记录
+    isp_history: List[dict] = field(default_factory=list)  # ISP统计历史记录
+    vi_history: List[dict] = field(default_factory=list)  # VI统计历史记录
+    vpss_history: List[dict] = field(default_factory=list)  # VPSS统计历史记录
+    venc_history: List[dict] = field(default_factory=list)  # VENC统计历史记录
+    rtsp_stats_list: List = field(default_factory=list)  # 保存的RTSP统计数据（用于stop()调用时保留stats）
     preCmd_executed: bool = False  # preCmd是否已执行
     case_dir: Optional[str] = None  # case目录路径
     start_time: Optional[datetime] = None
